@@ -42,9 +42,9 @@ session cookie gets `Secure`
   app boundary.
 - Add an operator kill switch in front of `/responses` for abuse
   emergencies.
-- If you need custom quotas or audit logging, disable the built-in proxy
-  (`enableResponsesProxy: false`) and build on
-  [`auth.getTokens()`](/docs/reference/server#gettokensrequest-options).
+- If you need custom quotas or audit logging, wrap
+  [`auth.proxyFetch(request)`](/docs/reference/server#proxyfetchrequest) in
+  your own route so raw tokens still stay inside the handler.
 
 ```ts title="server.ts"
 const auth = createChatGPTHandler({
@@ -64,8 +64,9 @@ Same-origin apps can leave `allowedOrigins` unset and keep the default
 [cross-origin guide](cross-origin.mdx): `allowedOrigins`, `SameSite=None`,
 credentialed fetches, and your own CORS headers.
 
-Never forward `getTokens({ includeRefreshToken: true })` output anywhere. The
-default redacted tokens are enough for every AI SDK call.
+Leave `dangerouslyAllowTokenExport` off for normal web apps. Only enable it
+when your application server intentionally accepts custody of raw ChatGPT
+bearer tokens, and never forward refresh-token export output anywhere.
 
 ## Operations
 

@@ -2,8 +2,9 @@
 
 Vercel AI SDK provider for [Login with ChatGPT](../../README.md).
 
-Use `createChatGPTProxyProvider()` in the browser and `createChatGPT()` on the
-server.
+Use `createChatGPTProxyProvider()` in browsers and app-server routes.
+`createChatGPT()` is for headless/server-only flows where you intentionally
+manage token custody yourself.
 
 ## Browser proxy mode
 
@@ -25,9 +26,17 @@ const result = streamText({
 });
 ```
 
-The proxy provider sends requests to your server handler. Tokens stay server-side.
+The proxy provider sends requests to your server handler. In browser code it
+uses the session cookie; in server routes, pass `auth.proxyFetch(request)` so
+tokens stay inside the handler:
 
-## Server token mode
+```ts
+const chatgpt = createChatGPTProxyProvider({
+  fetch: auth.proxyFetch(request),
+});
+```
+
+## Direct token mode
 
 ```ts
 import { createChatGPT } from "@opencoredev/loginwithchatgpt-ai";
@@ -50,6 +59,9 @@ const result = streamText({
   prompt,
 });
 ```
+
+Direct token mode is an escape hatch for CLIs, headless apps, or migrations.
+Normal web apps should keep using the proxy provider.
 
 To request Codex Fast tier through the browser proxy, pass the SDK header:
 

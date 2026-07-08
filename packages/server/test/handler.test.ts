@@ -322,7 +322,26 @@ describe("createChatGPTHandler", () => {
     expect(res.status).toBe(401);
   });
 
-  test("redacts the refresh token from getTokens unless explicitly requested", async () => {
+  test("routes request-scoped proxyFetch calls without exporting tokens", async () => {
+    let clock = 1000;
+    const handler = createChatGPTHandler({
+      fetch: createOpenAIMock({ pollsUntilAuthorized: 1, models: ["gpt-proxy"] }),
+      secret: "test-secret",
+      now: () => clock,
+    });
+
+    const login = await handler.handler(new Request(`${BASE}/login`, { method: "POST" }));
+    const cookie = cookieFrom(login);
+    clock += 2000;
+    await handler.handler(new Request(`${BASE}/status`, { headers: { cookie } }));
+
+    const proxyFetch = handler.proxyFetch(new Request(`${BASE}/custom-ai-route`, { headers: { cookie } }));
+    const models = await proxyFetch("/api/chatgpt/models", { headers: { accept: "application/json" } });
+    expect(models.status).toBe(200);
+    expect(await models.json()).toEqual({ models: ["gpt-proxy"] });
+  });
+
+  test("disables raw token export by default", async () => {
     let clock = 1000;
     const handler = createChatGPTHandler({
       fetch: createOpenAIMock({ pollsUntilAuthorized: 1 }),
@@ -335,13 +354,57 @@ describe("createChatGPTHandler", () => {
     clock += 2000;
     await handler.handler(new Request(`${BASE}/status`, { headers: { cookie } }));
 
-    const tokens = await handler.getTokens(new Request(`${BASE}/session`, { headers: { cookie } }));
+    await expect(
+      handler.dangerouslyGetTokens(new Request(`${BASE}/session`, { headers: { cookie } })),
+    ).rejects.toMatchObject({
+      code: "token_export_disabled",
+      status: 403,
+    });
+  });
+
+  test("redacts refresh tokens from the dangerous export unless separately enabled", async () => {
+    let clock = 1000;
+    const handler = createChatGPTHandler({
+      fetch: createOpenAIMock({ pollsUntilAuthorized: 1 }),
+      secret: "test-secret",
+      now: () => clock,
+      dangerouslyAllowTokenExport: true,
+    });
+
+    const login = await handler.handler(new Request(`${BASE}/login`, { method: "POST" }));
+    const cookie = cookieFrom(login);
+    clock += 2000;
+    await handler.handler(new Request(`${BASE}/status`, { headers: { cookie } }));
+
+    const tokens = await handler.dangerouslyGetTokens(new Request(`${BASE}/session`, { headers: { cookie } }));
     expect(tokens?.accessToken).toBeString();
     expect(tokens?.accountId).toBe("acct_1");
     expect(tokens?.refreshToken).toBeUndefined();
 
-    const exported = await handler.getTokens(
-      new Request(`${BASE}/session`, { headers: { cookie } }),
+    await expect(
+      handler.dangerouslyGetTokens(
+        new Request(`${BASE}/session`, { headers: { cookie } }),
+        { includeRefreshToken: true },
+      ),
+    ).rejects.toMatchObject({
+      code: "refresh_token_export_disabled",
+      status: 403,
+    });
+
+    const exportHandler = createChatGPTHandler({
+      fetch: createOpenAIMock({ pollsUntilAuthorized: 1 }),
+      secret: "test-secret",
+      now: () => clock,
+      dangerouslyAllowTokenExport: true,
+      dangerouslyAllowRefreshTokenExport: true,
+    });
+    const exportLogin = await exportHandler.handler(new Request(`${BASE}/login`, { method: "POST" }));
+    const exportCookie = cookieFrom(exportLogin);
+    clock += 2000;
+    await exportHandler.handler(new Request(`${BASE}/status`, { headers: { cookie: exportCookie } }));
+
+    const exported = await exportHandler.dangerouslyGetTokens(
+      new Request(`${BASE}/session`, { headers: { cookie: exportCookie } }),
       { includeRefreshToken: true },
     );
     expect(exported?.refreshToken).toBe("rt");
@@ -429,7 +492,7 @@ describe("createChatGPTHandler", () => {
         return jsonResponse({ authorization_code: "ac", code_challenge: "c", code_verifier: "v" });
       }
       if (url.endsWith("/oauth/token")) {
-        // exp: 2s epoch — already expired against the mocked clock, so every
+        // exp: 2s epoch. Already expired against the mocked clock, so every
         // getFreshTokens call would refresh without single-flight dedup.
         return jsonResponse({
           access_token: makeJwt({ exp: 2 }),
@@ -439,7 +502,12 @@ describe("createChatGPTHandler", () => {
       }
       throw new Error(`unexpected request: ${url}`);
     });
-    const handler = createChatGPTHandler({ fetch, secret: "test-secret", now: () => clock });
+    const handler = createChatGPTHandler({
+      fetch,
+      secret: "test-secret",
+      now: () => clock,
+      dangerouslyAllowTokenExport: true,
+    });
 
     const login = await handler.handler(new Request(`${BASE}/login`, { method: "POST" }));
     const cookie = cookieFrom(login);
@@ -447,7 +515,7 @@ describe("createChatGPTHandler", () => {
     await handler.handler(new Request(`${BASE}/status`, { headers: { cookie } }));
 
     const tokenCallsBefore = fetch.calls.filter((c) => c.url.endsWith("/oauth/token")).length;
-    const request = () => handler.getTokens(new Request(`${BASE}/session`, { headers: { cookie } }));
+    const request = () => handler.dangerouslyGetTokens(new Request(`${BASE}/session`, { headers: { cookie } }));
     await Promise.all([request(), request(), request(), request()]);
     const tokenCallsAfter = fetch.calls.filter((c) => c.url.endsWith("/oauth/token")).length;
     expect(tokenCallsAfter - tokenCallsBefore).toBe(1);

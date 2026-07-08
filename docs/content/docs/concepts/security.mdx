@@ -4,7 +4,7 @@ description: What a signed-in app can and cannot do, which guardrails ship by de
 ---
 
 Login with ChatGPT stores refreshable credentials for a ChatGPT account and
-can spend that user's plan. Treat the handler as billing-adjacent
+can spend that user's plan. Treat the handler as usage-sensitive
 infrastructure, not a harmless social login button.
 
 ## The threat model, honestly
@@ -15,13 +15,12 @@ users from buggy or careless integrations, not from a malicious developer,
 who controls the server and can change the code. Three things actually bound
 the damage:
 
-**The token's scope is fixed by OpenAI, not by this SDK.** The OAuth session
-belongs to the public Codex client and only works against the ChatGPT-backed
-Codex endpoints: model listing and AI requests. It cannot sign in to
-chatgpt.com as the user, read their conversations, change their email or
-password, or call the platform API. The worst a malicious app can do is spend
-the user's plan and read the profile fields in the id token (email, name,
-plan).
+**The SDK only uses the session for model listing and AI requests.** The
+OAuth session belongs to the public Codex client and the SDK routes it to the
+ChatGPT-backed Codex endpoints it supports. Do not promise users tighter
+access boundaries than OpenAI grants at the token level. A malicious server
+controls its own code, can spend the user's plan through supported AI
+requests, and can read the profile fields in the id token (email, name, plan).
 
 **The user's consent is the real gate.** The default widget shows a
 usage-risk warning before login, always. It can be customized but not
@@ -33,11 +32,11 @@ the app keeps nothing that works afterward.
 ## User consent
 
 The default `<LoginWithChatGPT />` widget shows a consent step before
-anything touches OpenAI: a popup, or inline when the popup is blocked. It
-tells users that requests bill to their own ChatGPT plan, that prompts and
+anything touches OpenAI: a tab/window, or inline when the window is blocked. It
+tells users that requests use their own ChatGPT plan, that prompts and
 attachments pass through your server, that the app never sees their password
-and cannot sign in to ChatGPT as them, and that signing out deletes the
-stored session.
+and that this SDK uses the session for model listing and AI requests, and
+that signing out deletes the stored session.
 
 If you build a custom UI with `useLoginWithChatGPT()` or a `children`
 renderer, that obligation moves to you. Render equivalent consent before
@@ -48,9 +47,11 @@ continue" is better than a vague "Connect".
 
 On without any configuration:
 
-- The refresh token never leaves the session layer. `auth.getTokens(request)`
-  returns only the short-lived access token unless you pass
-  `{ includeRefreshToken: true }`.
+- In the default configuration, refresh tokens never leave the session layer.
+  `auth.getTokens(request)` / `auth.dangerouslyGetTokens(request)` are disabled
+  unless the handler is configured with `dangerouslyAllowTokenExport: true`.
+- Normal app code can use `/responses`, `/models`, or `auth.proxyFetch(request)`
+  without receiving raw bearer tokens.
 - The `/responses` proxy rate limits each session at 30 requests/minute, so
   runaway client code cannot quietly burn a user's plan.
 - Cookie-authenticated non-GET routes reject cross-origin browser requests
@@ -71,11 +72,13 @@ the session expires or is deleted. Layer product-level limits on top:
 - Cap prompt length, output length, and attachment size at your app boundary.
 - Keep `/responses` the only spend path. Do not expose a generic OpenAI
   proxy.
+- Do not enable `dangerouslyAllowTokenExport` unless the application server is
+  intentionally trusted to hold raw ChatGPT bearer tokens.
 - Use a short `sessionTtlMs` for risky or public apps.
 - Add an emergency kill switch in front of the proxy route.
 - Log request metadata for abuse review, not prompts or file contents.
 - Rate limit `/login` and `/status` at the edge (WAF, CDN, or gateway). They
-  are unauthenticated by design — no session exists yet — so the handler
+  are unauthenticated by design, because no session exists yet, so the handler
   cannot see a trustworthy client IP to limit them itself. Without an edge
   limit, a script can drive repeated upstream device-code requests against
   your OpenAI client.

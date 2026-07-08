@@ -9,6 +9,8 @@ export type ChatGPTAuthErrorCode =
   | "refresh_token_invalid"
   | "not_authenticated"
   | "invalid_token"
+  | "token_export_disabled"
+  | "refresh_token_export_disabled"
   | "network_error"
   | "models_request_failed"
   | "responses_request_failed";

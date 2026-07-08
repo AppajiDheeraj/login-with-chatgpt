@@ -23,8 +23,8 @@ describe("createChatGPT", () => {
 
   test("reloads function credentials when an unrefreshable access token expires", async () => {
     // Refresh-token-less credentials are what the server handler's redacted
-    // getTokens() returns; the provider must go back to the source instead of
-    // reusing the expired access token.
+    // A loader that returns access-only credentials must be called again
+    // instead of reusing the expired access token.
     let loads = 0;
     const fetch = createMockFetch(() => jsonResponse({ models: [{ slug: "gpt-a" }] }));
     const chatgpt = createChatGPT({

@@ -33,6 +33,8 @@ try {
 | `refresh_token_invalid` | OpenAI reported the refresh token as expired, reused, or invalidated. The session is dead. The handler deletes it and reports `expired`. Detect with `isRefreshTokenInvalid(error)`. |
 | `not_authenticated` | An operation needed tokens and none exist. |
 | `invalid_token` | Tokens lack a usable `accountId`. |
+| `token_export_disabled` | Raw token export was requested without `dangerouslyAllowTokenExport`. |
+| `refresh_token_export_disabled` | Refresh-token export was requested without `dangerouslyAllowRefreshTokenExport`. |
 | `network_error` | The upstream request itself failed (DNS, timeout, offline). |
 | `models_request_failed` | `GET /models` upstream call failed. |
 | `responses_request_failed` | The proxied `/responses` upstream call failed. |
@@ -66,7 +68,7 @@ try {
   await chatgpt.listModels();
 } catch (error) {
   if (error instanceof ChatGPTProxyError && error.status === 401) {
-    // signed out — show the login button
+    // signed out; show the login button
   }
 }
 ```

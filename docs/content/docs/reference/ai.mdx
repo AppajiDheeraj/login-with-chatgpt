@@ -1,16 +1,17 @@
 ---
 title: AI SDK providers
-description: createChatGPTProxyProvider for the browser, createChatGPT for the server, and the shared provider API.
+description: createChatGPTProxyProvider for browser/server proxy mode, createChatGPT for direct token mode, and the shared provider API.
 ---
 
 `@opencoredev/loginwithchatgpt-ai` adapts the ChatGPT-backed Codex responses endpoint to
 the Vercel AI SDK (`ai` and `@ai-sdk/openai` are peer dependencies). Two
 factories, one provider shape:
 
-- **Proxy provider**: browser-safe. Sends requests to your server handler,
-  which injects credentials from the session cookie.
-- **Direct provider**: server-only. Holds a user's tokens and calls upstream
-  directly.
+- **Proxy provider**: default for browser and app-server routes. Sends
+  requests to your server handler, which injects credentials from the session
+  cookie.
+- **Direct provider**: headless/server-only escape hatch. Holds a user's tokens
+  and calls upstream directly.
 
 ## Provider API
 
@@ -48,45 +49,61 @@ const result = streamText({
 | `basePath` | `string` | `"/api/chatgpt"` | Handler mount path. Use an absolute URL for cross-origin setups. |
 | `fetch` | `FetchLike` | global `fetch` | Wraps the AI SDK's own requests to `/responses`. |
 | `credentials` | `RequestCredentials` | `"same-origin"` | Used by `listModels()`. |
-| `headers` | `Record<string, string>` | — | Extra headers on every request. |
+| `headers` | `Record<string, string>` | n/a | Extra headers on every request. |
 | `defaultModel` | `string` | `"gpt-5.5"` | Used by `chatgpt()` with no argument. |
 
 `listModels()` throws a `ChatGPTProxyError` (with a `status` field) on non-OK
 responses. Check `status === 401` to detect a signed-out user. Cross-origin
 setups need both `credentials` and a `fetch` wrapper; see the
-[cross-origin guide](/docs/guides/cross-origin).
+[cross-origin guide](../guides/cross-origin.mdx).
+
+The same provider is also the recommended app-server route pattern. Bind it to
+the current request with `auth.proxyFetch(request)`:
+
+```ts title="app/api/chat/route.ts"
+import { createChatGPTProxyProvider } from "@opencoredev/loginwithchatgpt-ai";
+import { streamText } from "ai";
+
+export async function POST(request: Request) {
+  const chatgpt = createChatGPTProxyProvider({
+    fetch: auth.proxyFetch(request),
+  });
+  const { prompt } = await request.json();
+  const result = streamText({ model: chatgpt(), prompt });
+  return result.toUIMessageStreamResponse();
+}
+```
 
 ## `createChatGPT(options)`
 
-```ts title="server"
+Use this only when you intentionally manage token custody yourself, such as a
+CLI/headless app or a migration path. Normal web apps should use
+`createChatGPTProxyProvider()` with `/responses` or `auth.proxyFetch(request)`.
+
+```ts title="headless-server"
 import { createChatGPT } from "@opencoredev/loginwithchatgpt-ai";
 import { streamText } from "ai";
 
-const tokens = await auth.getTokens(request);
-if (!tokens) return new Response("Unauthorized", { status: 401 });
-
 const chatgpt = createChatGPT({ credentials: tokens });
 const result = streamText({ model: chatgpt(), prompt });
-return result.toUIMessageStreamResponse();
 ```
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `credentials` | `ChatGPTTokens \| () => ChatGPTTokens \| Promise<ChatGPTTokens>` | required | Static tokens or a loader. |
-| `onRefresh` | `(tokens: ChatGPTTokens) => void \| Promise<void>` | — | Persist rotated tokens when you manage them yourself. |
-| `headers` | `Record<string, string>` | — | Extra headers on upstream requests. |
+| `onRefresh` | `(tokens: ChatGPTTokens) => void \| Promise<void>` | n/a | Persist rotated tokens when you manage them yourself. |
+| `headers` | `Record<string, string>` | n/a | Extra headers on upstream requests. |
 | `defaultModel` | `string` | `"gpt-5.5"` | Used by `chatgpt()` with no argument. |
-| + `CodexResponsesOptions` | — | — | `instructions`, `reasoningEffort`, `reasoningSummary`, `textVerbosity`, `serviceTier`; see [server defaults](server.mdx#codex-request-defaults). |
-| + `ChatGPTConfig` | — | — | Upstream overrides; see [core reference](core.mdx#chatgptconfig). |
+| + `CodexResponsesOptions` | n/a | n/a | `instructions`, `reasoningEffort`, `reasoningSummary`, `textVerbosity`, `serviceTier`; see [server defaults](server.mdx#codex-request-defaults). |
+| + `ChatGPTConfig` | n/a | n/a | Upstream overrides; see [core reference](core.mdx#chatgptconfig). |
 
 ### Refresh behavior
 
 - Tokens with a `refreshToken` refresh in place. Pass `onRefresh` to persist
-  rotations (see [Headless & CLI logins](/docs/guides/headless)).
-- Tokens without a `refreshToken`, which is the shape `auth.getTokens()`
-  returns, cannot self-refresh. If `credentials` is a function, the provider
-  calls it again when the access token expires, so pass a loader for
-  long-lived providers. Request-scoped providers need nothing.
+  rotations (see [Headless & CLI logins](../guides/headless.mdx)).
+- Tokens without a `refreshToken` cannot self-refresh. If `credentials` is a
+  function, the provider calls it again when the access token expires, so pass a
+  loader for long-lived direct providers.
 - Tokens without an `accountId` throw `ChatGPTAuthError` with code
   `invalid_token`.
 
@@ -95,7 +112,7 @@ return result.toUIMessageStreamResponse();
 Both providers route through `createCodexFetch()` from core, which adds auth
 headers and the `client_version` query parameter, then rewrites the body for
 the stateless Codex backend. The full rule list is in
-[Response proxy](/docs/concepts/response-proxy#request-normalization).
+[Response proxy](../concepts/response-proxy.mdx#request-normalization).
 
 ## Attachments
 

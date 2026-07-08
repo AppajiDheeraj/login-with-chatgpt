@@ -53,7 +53,7 @@ export interface ResponsesRateLimit {
   /** Window length in milliseconds. Defaults to 60 seconds. */
   windowMs?: number;
   /**
-   * Backing store for rate counters. Defaults to an in-memory store — use a
+   * Backing store for rate counters. Defaults to an in-memory store; use a
    * shared store when running multiple instances so limits apply globally.
    */
   store?: KeyValueStore<RateLimitBucket>;
@@ -92,11 +92,24 @@ export interface CreateChatGPTHandlerOptions extends ChatGPTConfig, CodexRespons
    * Extra origins (e.g. `https://app.example.com`) allowed to send
    * cookie-authenticated non-GET requests, for cross-origin frontend/backend
    * deployments. Browser requests from any other origin are rejected with 403
-   * so third-party sites can never ride the session cookie — even when it is
+   * so third-party sites can never ride the session cookie, even when it is
    * configured `SameSite=None`. Same-origin requests and requests without an
    * `Origin` header (non-browser clients) are always allowed.
    */
   allowedOrigins?: readonly string[];
+  /**
+   * Allows raw bearer-token export to application code through
+   * `dangerouslyGetTokens()` / deprecated `getTokens()`. Leave disabled for the
+   * normal self-hosted security model: use `/responses`, `/models`, or
+   * `proxyFetch(request)` so credentials stay inside this handler.
+   */
+  dangerouslyAllowTokenExport?: boolean;
+  /**
+   * Allows exporting the long-lived refresh token as well. Requires
+   * `dangerouslyAllowTokenExport` and should only be used for deliberate
+   * migration/export flows.
+   */
+  dangerouslyAllowRefreshTokenExport?: boolean;
   now?: () => number;
 }
 
@@ -108,11 +121,9 @@ export interface PublicSession {
 
 export interface GetTokensOptions {
   /**
-   * Also return the long-lived refresh token. Off by default so the credential
-   * that can mint new access tokens indefinitely never leaves the session
-   * layer: pass `credentials: () => auth.getTokens(request)` to `createChatGPT`
-   * and refresh keeps happening inside the handler without it. Only opt in when
-   * you genuinely need to export the session (e.g. migrating stores).
+   * Also return the long-lived refresh token. Disabled unless
+   * `dangerouslyAllowRefreshTokenExport` is set. Only opt in when you genuinely
+   * need to export the session, such as a controlled store migration.
    */
   includeRefreshToken?: boolean;
 }
@@ -123,13 +134,26 @@ export interface ChatGPTHandler {
   handler: (request: Request) => Promise<Response>;
   /** Alias of {@link handler} for `Bun.serve`/`fetch`-style mounting. */
   fetch: (request: Request) => Promise<Response>;
+  /**
+   * Creates a fetch implementation bound to the current request's session.
+   * Pass it to `createChatGPTProxyProvider({ fetch: auth.proxyFetch(request) })`
+   * from server routes that need AI SDK control without receiving raw tokens.
+   */
+  proxyFetch: (request: Request) => typeof fetch;
   /** Reads the current session (status + public user) for server-side rendering. */
   getSession: (request: Request) => Promise<PublicSession>;
   /**
-   * Returns fresh tokens for the session, e.g. to build an AI SDK provider.
-   * The refresh token is redacted unless explicitly requested via options.
+   * @deprecated Prefer `/responses`, `/models`, or `proxyFetch(request)`.
+   * Requires `dangerouslyAllowTokenExport` because it returns bearer material
+   * application code can log or exfiltrate.
    */
   getTokens: (request: Request, options?: GetTokensOptions) => Promise<ChatGPTTokens | undefined>;
+  /**
+   * Explicit raw-token escape hatch. Requires `dangerouslyAllowTokenExport`.
+   * The refresh token is still redacted unless
+   * `dangerouslyAllowRefreshTokenExport` is also set.
+   */
+  dangerouslyGetTokens: (request: Request, options?: GetTokensOptions) => Promise<ChatGPTTokens | undefined>;
   /** Returns the signed-in account's available model slugs. */
   getModels: (request: Request) => Promise<string[] | undefined>;
 }
@@ -184,6 +208,21 @@ export function createChatGPTHandler(options: CreateChatGPTHandlerOptions = {}):
     ...options.cookie,
   };
 
+  function createProxyFetch(sourceRequest: Request): typeof fetch {
+    const sourceUrl = new URL(sourceRequest.url);
+    const sourceCookie = sourceRequest.headers.get("cookie");
+    const sourceOrigin = sourceRequest.headers.get("origin") ?? sourceUrl.origin;
+
+    return (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+      const proxied = await toProxyRequest(input, init, {
+        baseUrl: sourceUrl,
+        cookie: sourceCookie,
+        origin: sourceOrigin,
+      });
+      return handler(proxied);
+    }) as typeof fetch;
+  }
+
   async function readSessionId(request: Request): Promise<string | undefined> {
     const signed = readCookie(request, cookieName);
     if (!signed) return undefined;
@@ -206,7 +245,7 @@ export function createChatGPTHandler(options: CreateChatGPTHandlerOptions = {}):
    * handler's own origin or `allowedOrigins`. This keeps third-party sites from
    * riding the session cookie (CSRF) even when it is set `SameSite=None` for a
    * cross-origin frontend. Requests without an `Origin` header (curl, server
-   * code) pass — they can't carry a victim's cookie.
+   * code) pass. They cannot carry a victim's cookie.
    */
   function checkOrigin(request: Request): Response | undefined {
     const origin = request.headers.get("origin");
@@ -413,25 +452,78 @@ export function createChatGPTHandler(options: CreateChatGPTHandlerOptions = {}):
     return method(request);
   };
 
+  async function dangerouslyGetTokens(
+    request: Request,
+    tokenOptions?: GetTokensOptions,
+  ): Promise<ChatGPTTokens | undefined> {
+    if (!options.dangerouslyAllowTokenExport) {
+      throw new ChatGPTAuthError(
+        "token_export_disabled",
+        "`dangerouslyGetTokens()` is disabled by default because ChatGPT bearer tokens are usable outside the proxy. Use `/responses`, `/models`, or `proxyFetch(request)`, or set `dangerouslyAllowTokenExport: true` if you accept that server-side trust boundary.",
+        { status: 403 },
+      );
+    }
+    if (tokenOptions?.includeRefreshToken && !options.dangerouslyAllowRefreshTokenExport) {
+      throw new ChatGPTAuthError(
+        "refresh_token_export_disabled",
+        "Refresh-token export is disabled. Set `dangerouslyAllowRefreshTokenExport: true` only for deliberate migration/export flows.",
+        { status: 403 },
+      );
+    }
+    const sessionId = await readSessionId(request);
+    const tokens = sessionId ? await sessions.getFreshTokens(sessionId) : undefined;
+    if (!tokens || tokenOptions?.includeRefreshToken) return tokens;
+    const { refreshToken: _redacted, ...safe } = tokens;
+    return safe;
+  }
+
   return {
     basePath,
     handler,
     fetch: handler,
+    proxyFetch: createProxyFetch,
     getSession: async (request) => {
       const sessionId = await readSessionId(request);
       if (!sessionId) return { status: "unauthenticated" };
       const data = await sessions.load(sessionId);
       return data ? toPublic(data) : { status: "unauthenticated" };
     },
-    getTokens: async (request, tokenOptions) => {
-      const sessionId = await readSessionId(request);
-      const tokens = sessionId ? await sessions.getFreshTokens(sessionId) : undefined;
-      if (!tokens || tokenOptions?.includeRefreshToken) return tokens;
-      const { refreshToken: _redacted, ...safe } = tokens;
-      return safe;
-    },
+    getTokens: dangerouslyGetTokens,
+    dangerouslyGetTokens,
     getModels: getModelsForRequest,
   };
+}
+
+async function toProxyRequest(
+  input: Parameters<typeof fetch>[0],
+  init: Parameters<typeof fetch>[1],
+  options: {
+    baseUrl: URL;
+    cookie: string | null;
+    origin: string;
+  },
+): Promise<Request> {
+  const inputRequest = input instanceof Request ? input : undefined;
+  const inputUrl =
+    typeof input === "string" ? input : input instanceof URL ? input.toString() : inputRequest ? inputRequest.url : String(input);
+  const url = new URL(inputUrl, options.baseUrl.origin);
+  const method = init?.method ?? inputRequest?.method ?? "GET";
+  const headers = new Headers(inputRequest?.headers);
+  if (init?.headers) new Headers(init.headers).forEach((value, key) => headers.set(key, value));
+  if (options.cookie) headers.set("cookie", options.cookie);
+  if (!headers.has("origin")) headers.set("origin", options.origin);
+
+  let body: BodyInit | undefined;
+  if (method !== "GET" && method !== "HEAD") {
+    body = init?.body ?? (inputRequest && inputRequest.body ? await inputRequest.clone().text() : undefined);
+  }
+
+  return new Request(url.toString(), {
+    method,
+    headers,
+    body,
+    signal: init?.signal ?? inputRequest?.signal,
+  });
 }
 
 function toPublic(data: { status: LoginStatus; user?: ChatGPTUser }): PublicSession {
@@ -572,7 +664,7 @@ function createEphemeralSecret(): string {
   if (!warnedAboutSecret) {
     warnedAboutSecret = true;
     console.warn(
-      "[login-with-chatgpt] No `secret` provided — using an ephemeral one. Sessions won't survive restarts or span instances. Set `secret` in production.",
+      "[login-with-chatgpt] No `secret` provided. Using an ephemeral one. Sessions won't survive restarts or span instances. Set `secret` in production.",
     );
   }
   return randomToken(32);

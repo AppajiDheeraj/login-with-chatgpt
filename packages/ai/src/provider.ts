@@ -18,7 +18,7 @@ export type ChatGPTLanguageModel = ReturnType<OpenAIProvider["responses"]>;
 
 /**
  * Callable provider. `chatgpt(modelId)` and `chatgpt.responses(modelId)` both
- * return a Codex responses model billed to the signed-in user's ChatGPT plan.
+ * return a Codex responses model that uses the signed-in user's ChatGPT plan.
  */
 export interface ChatGPTProvider {
   (modelId?: string): ChatGPTLanguageModel;
@@ -69,9 +69,9 @@ export function createChatGPT(options: CreateChatGPTOptions): ChatGPTProvider {
   let current: ChatGPTTokens | undefined;
 
   const getAuth = async (): Promise<CodexAuth> => {
-    // Credentials without a refresh token (e.g. the server handler's redacted
-    // `getTokens()`) can't be refreshed here — re-ask the credentials function
-    // for a fresh access token when the current one expires.
+    // Credentials without a refresh token cannot be refreshed here. Re-ask the
+    // credentials function for a fresh access token when the current one
+    // expires.
     if (
       !current ||
       (typeof credentials === "function" && !current.refreshToken && isAccessTokenExpired(current))

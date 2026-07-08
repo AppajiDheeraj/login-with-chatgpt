@@ -13,7 +13,7 @@
 - Works with the Vercel AI SDK: `streamText()` straight from the client
 - Open source, MIT licensed
 
-Your server keeps the tokens. The browser gets a session cookie, asks your backend which models the account has, and streams from there.
+The handler keeps tokens behind the proxy path by default. The browser gets a session cookie, asks your backend which models the account has, and streams from there.
 
 ## Install
 
@@ -38,7 +38,7 @@ Start with the [quickstart](./docs/content/docs/quickstart.mdx). The [security m
 
 ## Agent skill
 
-Using Claude Code, Cursor, or Codex? Install the [agent skill](./skills/login-with-chatgpt/SKILL.md) so your agent wires the SDK correctly — no invented API keys, no hardcoded model slugs:
+Using Claude Code, Cursor, or Codex? Install the [agent skill](./skills/login-with-chatgpt/SKILL.md) so your agent wires the SDK correctly: no invented API keys, and no assuming one model slug works for every account.
 
 ```bash
 npx skills add opencoredev/login-with-chatgpt

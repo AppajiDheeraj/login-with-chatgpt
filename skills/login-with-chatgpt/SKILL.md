@@ -2,8 +2,8 @@
 name: login-with-chatgpt
 description: >-
   Integrate Login with ChatGPT (@opencoredev/loginwithchatgpt-*): let users
-  sign in with their own ChatGPT account and stream AI responses billed to
-  their subscription. Use when adding ChatGPT account login, mounting
+  sign in with their own ChatGPT account and run AI requests against their
+  ChatGPT plan. Use when adding ChatGPT account login, mounting
   createChatGPTHandler, rendering the LoginWithChatGPT React button or
   useLoginWithChatGPT hook, wiring createChatGPTProxyProvider /
   createChatGPT with the Vercel AI SDK, or debugging /api/chatgpt routes.
@@ -12,22 +12,26 @@ license: MIT
 
 # Login with ChatGPT
 
-SDK for "sign in with your ChatGPT account". Users authenticate via OpenAI's
-device flow; your server keeps the tokens and proxies Responses-API calls.
+SDK for "sign in with your ChatGPT account". Users authenticate through
+OpenAI's device flow; your handler keeps the tokens and proxies
+Responses-style calls to the ChatGPT-backed Codex endpoint.
 The browser only ever holds an HttpOnly session cookie.
 
-## Rules — read these before writing code
+## Rules: read before writing code
 
 1. **There is no API key.** Auth comes from each user's ChatGPT session.
    Never add `OPENAI_API_KEY`, never call `api.openai.com` directly for this
    flow. Requests go through the app's own `/api/chatgpt/responses` proxy or
-   a server route built on `auth.getTokens()`.
-2. **Never hardcode model slugs.** Availability is per account and plan. Call
-   `await chatgpt.listModels()` (browser) or `await auth.getModels(request)`
-   (server) and pick from the result.
-3. **Tokens never reach the browser.** Don't build endpoints that return
-   tokens to the client, and never forward
-   `getTokens({ includeRefreshToken: true })` output anywhere.
+   a server route built on `auth.proxyFetch(request)`.
+2. **Discover before selecting a model.** Availability is per account and
+   plan. Call `await chatgpt.listModels()` (browser) or
+   `await auth.getModels(request)` (server), then pick from that result.
+   A hardcoded `allowedModels` guardrail is fine; assuming one model exists
+   for every signed-in account is not.
+3. **Tokens stay inside the handler by default.** Don't build endpoints that
+   return tokens to the client. Normal app code should use `/responses`,
+   `/models`, or `auth.proxyFetch(request)`. Raw token export requires the
+   explicit `dangerouslyAllowTokenExport` escape hatch.
 4. **Consent cannot be removed.** The widget always shows a consent step
    before OpenAI's verification page. Custom UIs must render equivalent
    consent before calling `login()`.
@@ -39,10 +43,10 @@ The browser only ever holds an HttpOnly session cookie.
 
 | Package | Use for |
 | --- | --- |
-| `@opencoredev/loginwithchatgpt-server` | `createChatGPTHandler()` — login, session, logout, models, streaming proxy |
+| `@opencoredev/loginwithchatgpt-server` | `createChatGPTHandler()` for login, session, logout, models, and the streaming proxy |
 | `@opencoredev/loginwithchatgpt-react` | `<LoginWithChatGPT />` button, `useLoginWithChatGPT()` hook |
 | `@opencoredev/loginwithchatgpt-ai` | Vercel AI SDK providers (`ai` + `@ai-sdk/openai` are peer deps) |
-| `@opencoredev/loginwithchatgpt-core` | Low-level OAuth/device flow, errors, types — rarely imported directly |
+| `@opencoredev/loginwithchatgpt-core` | Low-level OAuth/device flow, errors, and types; rarely imported directly |
 
 ```bash
 bun add @opencoredev/loginwithchatgpt-server @opencoredev/loginwithchatgpt-react @opencoredev/loginwithchatgpt-ai ai @ai-sdk/openai
@@ -50,9 +54,9 @@ bun add @opencoredev/loginwithchatgpt-server @opencoredev/loginwithchatgpt-react
 
 ## Server handler
 
-One Web-standard handler owns everything under `basePath` (default
-`/api/chatgpt`). It needs only `Request`/`Response`/`fetch`/`crypto`, so Bun,
-Node 18+, and edge runtimes all work.
+One handler owns everything under `basePath` (default `/api/chatgpt`). It is
+written against Web-standard `Request`, `Response`, `fetch`, and
+`crypto.subtle`, so use it in runtimes that provide those APIs.
 
 ```ts
 // Next.js: app/api/chatgpt/[...lwc]/route.ts
@@ -88,10 +92,12 @@ Key options: `basePath`, `secret`, `sessionStore` (any
 
 Server helpers on the returned handler (all read the session cookie):
 
-- `auth.getSession(request)` → `{ status, user? }` — no upstream call.
-- `auth.getTokens(request)` → fresh access token or `undefined`; refreshes
-  automatically. Use to build custom AI routes.
+- `auth.getSession(request)` → `{ status, user? }`; no upstream call.
+- `auth.proxyFetch(request)` → request-scoped fetch for custom server AI
+  routes without exposing raw bearer tokens.
 - `auth.getModels(request)` → account's model slugs or `undefined`.
+- `auth.dangerouslyGetTokens(request)` → raw-token escape hatch; requires
+  `dangerouslyAllowTokenExport`.
 
 ## React sign-in
 
@@ -119,7 +125,7 @@ expired | error`.
 
 ## Streaming with the AI SDK
 
-Browser (proxy provider — credentials injected server-side from the cookie):
+Browser proxy provider, with credentials injected server-side from the cookie:
 
 ```ts
 import { createChatGPTProxyProvider } from "@opencoredev/loginwithchatgpt-ai";
@@ -133,17 +139,16 @@ const model = models.includes("gpt-5.5") ? "gpt-5.5" : models[0];
 const result = streamText({ model: chatgpt(model), prompt });
 ```
 
-Server (direct provider — for your own AI route):
+Server proxy provider for your own AI route:
 
 ```ts
-import { createChatGPT } from "@opencoredev/loginwithchatgpt-ai";
+import { createChatGPTProxyProvider } from "@opencoredev/loginwithchatgpt-ai";
 import { streamText } from "ai";
 
 export async function POST(request: Request) {
-  const tokens = await auth.getTokens(request);
-  if (!tokens) return new Response("Unauthorized", { status: 401 });
-
-  const chatgpt = createChatGPT({ credentials: tokens });
+  const chatgpt = createChatGPTProxyProvider({
+    fetch: auth.proxyFetch(request),
+  });
   const { prompt } = await request.json();
   return streamText({ model: chatgpt(), prompt }).toUIMessageStreamResponse();
 }
@@ -152,7 +157,7 @@ export async function POST(request: Request) {
 Models support `streamText`, `generateText`, tool calling, structured
 output, and file attachments via standard AI SDK `messages`. For
 embeddings/images/audio, use the official OpenAI provider with an API key
-instead — this SDK only covers the responses endpoint.
+instead. This SDK only covers the responses endpoint.
 
 Per-request tuning headers on `POST /responses`:
 `x-login-with-chatgpt-reasoning-effort` (`none|low|medium|high|xhigh`) and
@@ -167,7 +172,7 @@ Per-request tuning headers on `POST /responses`:
 | `GET /session` | Cheap state read, never polls upstream |
 | `POST /logout` | Delete session, clear cookie |
 | `GET /models` | Account's model slugs (401 when signed out) |
-| `POST /responses` | Streaming Responses-API proxy |
+| `POST /responses` | Streaming Responses-style proxy |
 
 Non-GET routes enforce Origin-based CSRF: same-origin or `allowedOrigins`
 only. Split frontend/backend deployments also need `SameSite=None` cookies,
@@ -176,7 +181,7 @@ credentialed fetches, and CORS headers (see the cross-origin guide).
 ## Production checklist
 
 - Set `LWC_SECRET` (stable across deploys; rotation logs everyone out).
-- Use a shared `sessionStore` (Redis/DB) — `MemoryStore` is dev-only.
+- Use a shared `sessionStore` (Redis/DB). `MemoryStore` is dev-only.
 - Set `responsesProxy.allowedModels`; pass a shared `rateLimit.store` when
   running multiple instances.
 - HTTPS with `X-Forwarded-Proto` forwarded so the cookie gets `Secure`.
@@ -186,7 +191,7 @@ credentialed fetches, and CORS headers (see the cross-origin guide).
 ## Errors
 
 `ChatGPTAuthError` (from core) has `.code`, `.status`, `.body`. Notable
-codes: `refresh_token_invalid` (session dead — handler deletes it and
+codes: `refresh_token_invalid` (session dead; handler deletes it and
 reports `expired`; detect with `isRefreshTokenInvalid(error)`),
 `not_authenticated`, `token_refresh_failed` (retryable),
 `models_request_failed`. The browser provider's `listModels()` throws

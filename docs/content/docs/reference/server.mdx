@@ -1,6 +1,6 @@
 ---
 title: Server handler
-description: createChatGPTHandler() options, defaults, and the getSession / getTokens / getModels helpers.
+description: createChatGPTHandler() options, defaults, and the getSession / proxyFetch / getModels helpers.
 ---
 
 ```ts
@@ -16,15 +16,18 @@ interface ChatGPTHandler {
   basePath: string;
   handler: (request: Request) => Promise<Response>;
   fetch: (request: Request) => Promise<Response>; // alias of handler
+  proxyFetch: (request: Request) => typeof fetch;
   getSession: (request: Request) => Promise<PublicSession>;
-  getTokens: (request: Request, options?: { includeRefreshToken?: boolean }) => Promise<ChatGPTTokens | undefined>;
   getModels: (request: Request) => Promise<string[] | undefined>;
+  dangerouslyGetTokens: (request: Request, options?: { includeRefreshToken?: boolean }) => Promise<ChatGPTTokens | undefined>;
+  /** @deprecated Prefer proxyFetch(), /responses, or /models. */
+  getTokens: (request: Request, options?: { includeRefreshToken?: boolean }) => Promise<ChatGPTTokens | undefined>;
 }
 ```
 
 Mount `handler` at `${basePath}/*`. It only requires Web-standard `Request`,
-`Response`, `fetch`, and `crypto`, so Bun, Node 18+, and edge runtimes all
-work. The routes it serves are documented in [HTTP routes](routes.mdx).
+`Response`, `fetch`, and `crypto.subtle`, so use it in runtimes that provide
+those APIs. The routes it serves are documented in [HTTP routes](routes.mdx).
 
 ## Options
 
@@ -42,6 +45,8 @@ work. The routes it serves are documented in [HTTP routes](routes.mdx).
 | `enableResponsesProxy` | `boolean` | `true` | `false` disables the `/responses` **and** `/models` routes. |
 | `responsesProxy` | `ResponsesProxyPolicy` | `{}` | Guardrails below. |
 | `allowedOrigins` | `readonly string[]` | `[]` | Extra origins allowed on cookie-authenticated non-GET routes. |
+| `dangerouslyAllowTokenExport` | `boolean` | `false` | Enables `dangerouslyGetTokens()` / deprecated `getTokens()`. Only use when your server code intentionally accepts custody of raw bearer tokens. |
+| `dangerouslyAllowRefreshTokenExport` | `boolean` | `false` | Also allows `{ includeRefreshToken: true }`. Requires `dangerouslyAllowTokenExport`; use only for deliberate migration/export flows. |
 
 ### `responsesProxy`
 
@@ -54,12 +59,12 @@ work. The routes it serves are documented in [HTTP routes](routes.mdx).
 ### Codex request defaults
 
 Applied to proxied `/responses` bodies when the request does not set them
-(see [request normalization](/docs/concepts/response-proxy#request-normalization)):
+(see [request normalization](../concepts/response-proxy.mdx#request-normalization)):
 
 | Option | Type | Effective default | Notes |
 | --- | --- | --- | --- |
 | `instructions` | `string` | a generic assistant prompt | Sent when the body has no `instructions`. |
-| `reasoningEffort` | `"none" \| "low" \| "medium" \| "high" \| "xhigh"` | `"medium"` | Overridden per request by the [reasoning header](/docs/guides/fast-and-reasoning). |
+| `reasoningEffort` | `"none" \| "low" \| "medium" \| "high" \| "xhigh"` | `"medium"` | Overridden per request by the [reasoning header](../guides/fast-and-reasoning.mdx). |
 | `reasoningSummary` | `string` | `"auto"` | Merged into `reasoning`. |
 | `textVerbosity` | `"low" \| "medium" \| "high"` | `"medium"` | Merged into `text`. |
 | `serviceTier` | `"auto" \| "default" \| "flex" \| "priority" \| "fast"` | unset | Applied when the body has no `service_tier`. |
@@ -85,24 +90,20 @@ const session = await auth.getSession(request);
 // or { status: "unauthenticated" | "pending" | "expired" | "error" }
 ```
 
-### `getTokens(request, options?)`
+### `proxyFetch(request)`
 
-Returns a fresh access token or `undefined` when unauthenticated. Refreshes
-automatically, and concurrent calls share one refresh per session. The
-refresh token is redacted unless you pass `{ includeRefreshToken: true }`,
-which exists for exporting a session, not for request handling.
-
-Use it to build your own server-side AI route:
+Creates a request-scoped fetch that carries the user's session cookie back
+through the mounted handler. Use it when you want a custom server route with
+AI SDK control, but you do not want application code to receive bearer tokens:
 
 ```ts title="app/api/chat/route.ts"
-import { createChatGPT } from "@opencoredev/loginwithchatgpt-ai";
+import { createChatGPTProxyProvider } from "@opencoredev/loginwithchatgpt-ai";
 import { streamText } from "ai";
 
 export async function POST(request: Request) {
-  const tokens = await auth.getTokens(request);
-  if (!tokens) return new Response("Unauthorized", { status: 401 });
-
-  const chatgpt = createChatGPT({ credentials: tokens });
+  const chatgpt = createChatGPTProxyProvider({
+    fetch: auth.proxyFetch(request),
+  });
   const { prompt } = await request.json();
 
   const result = streamText({ model: chatgpt(), prompt });
@@ -110,11 +111,35 @@ export async function POST(request: Request) {
 }
 ```
 
+The provider still calls `/api/chatgpt/responses` and `/api/chatgpt/models`;
+the handler loads, refreshes, and injects credentials internally.
+
 ### `getModels(request)`
 
 Returns the account's model slugs, or `undefined` when unauthenticated.
 Refreshes tokens before calling upstream. Throws `ChatGPTAuthError` with code
 `models_request_failed` on upstream failure.
+
+### `dangerouslyGetTokens(request, options?)`
+
+Disabled unless `createChatGPTHandler({ dangerouslyAllowTokenExport: true })`
+is set. When enabled, returns a fresh access token plus account id, with the
+refresh token redacted by default.
+
+Exporting bearer tokens moves trust from the SDK boundary into your application
+code: server code can log, copy, or forward them. Prefer `proxyFetch(request)`
+for request handling. Only enable this for advanced integrations that
+intentionally accept that custody model.
+
+```ts
+const tokens = await auth.dangerouslyGetTokens(request);
+// { accessToken, accountId, expiresAt } with no refreshToken
+
+const exported = await auth.dangerouslyGetTokens(request, {
+  includeRefreshToken: true,
+});
+// Requires dangerouslyAllowRefreshTokenExport: true. Use only for migration/export flows.
+```
 
 ## Session storage
 
@@ -131,4 +156,4 @@ interface KeyValueStore<T> {
 
 `MemoryStore` (exported for tests and local dev) enforces TTL lazily at read
 time. How the cookie, store, and refresh cycle fit together is covered in
-[Sessions & tokens](/docs/concepts/sessions).
+[Sessions & tokens](../concepts/sessions.mdx).

@@ -15,7 +15,7 @@ app never needs a localhost listener or a registered callback URL:
 1. The browser calls `POST /api/chatgpt/login`. The handler requests a device
    code from `auth.openai.com` and stores it in the session.
 2. The browser shows the user code (something like `7B0J-DPK78`) and opens
-   OpenAI's verification page in a popup.
+   OpenAI's verification page in a separate tab/window.
 3. The user enters the code and authorizes on OpenAI's page.
 4. The browser polls `GET /api/chatgpt/status`. Each request advances at most
    one upstream poll, at the interval OpenAI asked for.
@@ -59,7 +59,7 @@ encrypted at rest and never appear in a route response. The only user data
 the browser gets is `ChatGPTUser` (account id, email, name, plan), which comes
 from id-token claims.
 
-Server helpers like `getTokens()` refresh before returning and redact the
-refresh token by default, so app code never holds a credential that can mint
-new tokens indefinitely. [Sessions & tokens](sessions.mdx) covers the
-mechanics.
+Normal app code uses `/responses`, `/models`, or `auth.proxyFetch(request)`,
+so bearer tokens stay inside the handler. Raw token export exists only behind
+the explicit dangerous escape hatch for advanced custody/migration cases.
+[Sessions & tokens](sessions.mdx) covers the mechanics.

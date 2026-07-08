@@ -39,16 +39,19 @@ Bun.serve({
 
 ```ts
 const session = await auth.getSession(request);
-const tokens = await auth.getTokens(request); // refresh token redacted by default
 const models = await auth.getModels(request);
+const proxyFetch = auth.proxyFetch(request);
 ```
 
 ## Security defaults
 
 - Tokens are encrypted at rest (AES-GCM) when `secret` is configured, and the
   session cookie is HttpOnly and HMAC-signed.
-- `getTokens()` returns only the short-lived access token; the refresh token
-  stays in the session layer unless you pass `{ includeRefreshToken: true }`.
+- Normal app code uses `/responses`, `/models`, or `proxyFetch(request)`, so
+  raw bearer tokens stay inside the handler.
+- Raw token export is disabled by default. `dangerouslyGetTokens()` requires
+  `dangerouslyAllowTokenExport: true`; refresh-token export additionally
+  requires `dangerouslyAllowRefreshTokenExport: true`.
 - `/responses` is rate limited per session (30 requests/minute by default) via
   `responsesProxy.rateLimit`; requests through it spend the signed-in user's
   own ChatGPT plan.

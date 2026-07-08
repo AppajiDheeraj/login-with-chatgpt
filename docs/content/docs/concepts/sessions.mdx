@@ -84,14 +84,25 @@ session dies. The handler refreshes automatically:
 
 ## What app code gets
 
-`auth.getTokens(request)` returns a fresh access token plus account id, with
-the refresh token redacted. Refresh happens inside the session layer, so
-request-scoped code never needs it:
+Normal app code should not receive bearer tokens at all. Use `/responses`,
+`/models`, or `auth.proxyFetch(request)` so the handler loads, refreshes, and
+injects credentials internally:
 
 ```ts
-const tokens = await auth.getTokens(request);
-// { accessToken, accountId, expiresAt } — no refreshToken
+const chatgpt = createChatGPTProxyProvider({
+  fetch: auth.proxyFetch(request),
+});
+```
 
-const exported = await auth.getTokens(request, { includeRefreshToken: true });
+Raw token export is an advanced escape hatch and is disabled by default:
+
+```ts
+const tokens = await auth.dangerouslyGetTokens(request);
+// Requires dangerouslyAllowTokenExport: true.
+
+const exported = await auth.dangerouslyGetTokens(request, {
+  includeRefreshToken: true,
+});
+// Also requires dangerouslyAllowRefreshTokenExport: true.
 // Only for exporting a session, e.g. a store migration. Never log or forward this.
 ```

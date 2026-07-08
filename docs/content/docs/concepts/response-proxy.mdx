@@ -51,9 +51,10 @@ const auth = createChatGPTHandler({
   `responsesProxy.rateLimit` to enforce the limit globally.
 </Callout>
 
-If you need custom quotas, audit logging, or stricter endpoint controls, set
-`enableResponsesProxy: false` (which also disables `/models`) and build your
-own route on [`auth.getTokens()`](/docs/reference/server#gettokensrequest-options).
+If you need custom quotas, audit logging, or stricter endpoint controls, keep
+the request-scoped proxy pattern and wrap `auth.proxyFetch(request)` in your own
+route. Raw token export is available only through the explicit dangerous escape
+hatch in the [server reference](/docs/reference/server#dangerouslygettokensrequest-options).
 
 ## Request normalization
 
